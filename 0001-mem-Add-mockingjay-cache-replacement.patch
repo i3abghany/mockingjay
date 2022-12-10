@@ -1,0 +1,892 @@
+From 4fd37a4920d445fc33979b2563ea1786d6814f22 Mon Sep 17 00:00:00 2001
+From: Mahmoud Abumandour <mam47@sfu.ca>
+Date: Sat, 10 Dec 2022 04:26:06 +0000
+Subject: [PATCH] mem:Add mockingjay cache replacement
+
+Change-Id: Ic2feab15050bd0cfe35d556eb2b46e06d1dcd36c
+---
+ .clang-format                                 |   6 +
+ .../ReplacementPolicies.py                    |   5 +
+ src/mem/cache/replacement_policies/SConscript |   3 +-
+ src/mem/cache/replacement_policies/mj_rp.cc   | 402 ++++++++++++++++++
+ src/mem/cache/replacement_policies/mj_rp.hh   | 394 +++++++++++++++++
+ .../classic/caches/l2cache.py                 |   3 +
+ 6 files changed, 812 insertions(+), 1 deletion(-)
+ create mode 100644 .clang-format
+ create mode 100644 src/mem/cache/replacement_policies/mj_rp.cc
+ create mode 100644 src/mem/cache/replacement_policies/mj_rp.hh
+
+diff --git a/.clang-format b/.clang-format
+new file mode 100644
+index 0000000000..1d6cb39fa9
+--- /dev/null
++++ b/.clang-format
+@@ -0,0 +1,6 @@
++BasedOnStyle: LLVM
++IndentWidth: 4
++Language: Cpp
++PointerAlignment: Left
++ColumnLimit: 79
++BreakBeforeBraces: Allman
+diff --git a/src/mem/cache/replacement_policies/ReplacementPolicies.py b/src/mem/cache/replacement_policies/ReplacementPolicies.py
+index 3676a39126..b1f4b0ef5b 100644
+--- a/src/mem/cache/replacement_policies/ReplacementPolicies.py
++++ b/src/mem/cache/replacement_policies/ReplacementPolicies.py
+@@ -149,3 +149,8 @@ class WeightedLRURP(LRURP):
+     type = "WeightedLRURP"
+     cxx_class = 'gem5::replacement_policy::WeightedLRU'
+     cxx_header = "mem/cache/replacement_policies/weighted_lru_rp.hh"
++
++class MJRP(BaseReplacementPolicy):
++    type = "MJRP"
++    cxx_class = 'gem5::replacement_policy::MJRP'
++    cxx_header = "mem/cache/replacement_policies/mj_rp.hh"
+diff --git a/src/mem/cache/replacement_policies/SConscript b/src/mem/cache/replacement_policies/SConscript
+index 027093fd8f..bb9ee7e241 100644
+--- a/src/mem/cache/replacement_policies/SConscript
++++ b/src/mem/cache/replacement_policies/SConscript
+@@ -31,7 +31,7 @@ Import('*')
+ SimObject('ReplacementPolicies.py', sim_objects=[
+     'BaseReplacementPolicy', 'DuelingRP', 'FIFORP', 'SecondChanceRP',
+     'LFURP', 'LRURP', 'BIPRP', 'MRURP', 'RandomRP', 'BRRIPRP', 'SHiPRP',
+-    'SHiPMemRP', 'SHiPPCRP', 'TreePLRURP', 'WeightedLRURP'])
++    'SHiPMemRP', 'SHiPPCRP', 'TreePLRURP', 'WeightedLRURP', 'MJRP'])
+ 
+ Source('bip_rp.cc')
+ Source('brrip_rp.cc')
+@@ -45,5 +45,6 @@ Source('second_chance_rp.cc')
+ Source('ship_rp.cc')
+ Source('tree_plru_rp.cc')
+ Source('weighted_lru_rp.cc')
++Source('mj_rp.cc')
+ 
+ GTest('replaceable_entry.test', 'replaceable_entry.test.cc')
+diff --git a/src/mem/cache/replacement_policies/mj_rp.cc b/src/mem/cache/replacement_policies/mj_rp.cc
+new file mode 100644
+index 0000000000..cc941a9745
+--- /dev/null
++++ b/src/mem/cache/replacement_policies/mj_rp.cc
+@@ -0,0 +1,402 @@
++/**
++ * Copyright (c) 2018-2020 Inria
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met: redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer;
++ * redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution;
++ * neither the name of the copyright holders nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "mem/cache/replacement_policies/mj_rp.hh"
++
++#include <cassert>
++#include <cmath>
++#include <memory>
++
++#include "params/MJRP.hh"
++#include "sim/cur_tick.hh"
++
++namespace gem5
++{
++
++GEM5_DEPRECATED_NAMESPACE(ReplacementPolicy, replacement_policy);
++namespace replacement_policy
++{
++
++static uint64_t murmur_hash(uint64_t pc)
++{
++    pc ^= pc >> 33;
++    pc *= 0xff51afd7ed558ccdL;
++    pc ^= pc >> 33;
++    pc *= 0xc4ceb9fe1a85ec53L;
++    pc ^= pc >> 33;
++    return pc;
++}
++
++static uint64_t get_pc_signature(uint64_t pc, bool is_hit)
++{
++    return murmur_hash((pc << 1) | (is_hit)) & (PC_SIG_MASK);
++}
++
++MJRP::MJRP(const Params& p) : Base(p)
++{
++    sampled_cache.init();
++    etr_counters.init(LLC_NUM_SETS, LLC_NUM_WAYS);
++}
++
++void MJRP::invalidate(const std::shared_ptr<ReplacementData>& replacement_data)
++{
++    // Reset last touch timestamp
++    std::static_pointer_cast<MJReplData>(replacement_data)->lastTouchTick =
++        Tick(0);
++}
++
++void MJRP::touch(
++    const std::shared_ptr<ReplacementData>& replacement_data) const
++{
++    panic("CAN'T OPERATE WITHOUT ACCESS PACKET INFORMATION");
++}
++
++void MJRP::touch(const std::shared_ptr<ReplacementData>& replacement_data,
++                 const PacketPtr pkt)
++{
++    warn("ENTER TOUCH\n");
++    auto castedData = std::static_pointer_cast<MJReplData>(replacement_data);
++    uint64_t ip = 0;
++    if (pkt->req->hasPC())
++        ip = pkt->req->getPC();
++    auto fullAddr = pkt->getAddr();
++    auto set = castedData->set;
++    auto way = castedData->way;
++    uint16_t pcSignature = get_pc_signature(ip, true);
++    castedData->generatingPCSignature = pcSignature;
++    if (sampled_cache.is_set_to_sample(set))
++    {
++        auto sampled_set = sampled_cache.get_set(fullAddr);
++        auto sampled_tag = sampled_cache.get_tag(fullAddr);
++        auto sampled_way = sampled_cache.is_present(sampled_tag, sampled_set);
++        if (sampled_way == -1)
++            goto out;
++
++        auto& entry = sampled_cache.at(sampled_set, sampled_way);
++        auto last_sig = entry.last_pc_signature;
++        auto last_access_timestamp = entry.last_access_timestamp;
++        auto sset_timestamp = etr_counters.get_set_timestamp(sampled_set);
++        int diff = abs(last_access_timestamp - sset_timestamp);
++
++        if (diff <= 127)
++        {
++            int rdp_value = rdp.get_value_of(pcSignature);
++            int new_val = 0;
++
++            if (rdp_value == std::numeric_limits<uint8_t>::max())
++                new_val = diff;
++            else
++                new_val = rdp_value + (rdp_value > diff)
++                              ? std::min(1, diff / 16)
++                              : -std::min(1, diff / 16);
++
++            rdp.set_value_of(pcSignature, new_val);
++            sampled_cache.at(sampled_set, sampled_way).valid = false;
++        }
++
++        int lru_way = -1;
++        int lru_rd = -1;
++        for (int w = 0; w < SAMPLED_CACHE_WAYS; w++)
++        {
++            if (!sampled_cache.at(sampled_set, w).valid)
++            {
++                lru_way = w;
++                lru_rd = INF_RD + 1;
++                continue;
++            }
++
++            uint64_t last_timestamp =
++                sampled_cache.at(sampled_set, w).last_access_timestamp;
++            int set_timestamp = etr_counters.get_set_timestamp(sampled_set);
++            int diff = 0;
++            if (set_timestamp > last_timestamp)
++                diff = set_timestamp > last_timestamp;
++            else
++            {
++                diff = set_timestamp + (1 << TIMESTAMP_BITS);
++                diff -= last_timestamp;
++            }
++            if (diff > INF_RD)
++            {
++                lru_way = w;
++                lru_rd = INF_RD + 1;
++                penalize_block(sampled_set, w);
++            }
++            else if (diff > lru_rd)
++            {
++                lru_way = w;
++                lru_rd = diff;
++            }
++        }
++        penalize_block(sampled_set, lru_way);
++
++        for (int w = 0; w < SAMPLED_CACHE_WAYS; w++)
++        {
++            auto& tmpEntry = sampled_cache.at(sampled_set, w);
++            if (!tmpEntry.valid)
++            {
++                tmpEntry.valid = true;
++                tmpEntry.last_pc_signature = pcSignature;
++                tmpEntry.tag = sampled_tag;
++                tmpEntry.last_access_timestamp =
++                    etr_counters.get_set_timestamp(set);
++                break;
++            }
++        }
++        etr_counters.increment_timestamp(sampled_set);
++    }
++out:
++
++    if (etr_counters.get_current_set_clock(set) == GRANULARITY)
++    {
++        for (int w = 0; w < LLC_NUM_WAYS; w++)
++        {
++            if ((uint32_t)w != way &&
++                abs(etr_counters.get_estimated_time_remaining(set, w)) <
++                    INF_ETR)
++                etr_counters.downgrade(set, w);
++        }
++        etr_counters.reset_set_clock(set);
++    }
++    etr_counters.set_current_set_clock(
++        set, etr_counters.get_current_set_clock(set) + 1);
++
++    if (way < LLC_NUM_WAYS)
++    {
++        if (rdp.get_value_of(pcSignature) ==
++            std::numeric_limits<uint8_t>::max())
++        {
++            etr_counters.set_estimated_time_remaining(set, way, 0);
++        }
++        else
++        {
++            if (rdp.get_value_of(pcSignature) > MAX_RD)
++                etr_counters.set_estimated_time_remaining(set, way, INF_ETR);
++            else
++                etr_counters.set_estimated_time_remaining(
++                    set, way, rdp.get_value_of(pcSignature) / GRANULARITY);
++        }
++    }
++
++    warn("EXIT TOUCH\n");
++    return;
++}
++
++void MJRP::reset(
++    const std::shared_ptr<ReplacementData>& replacement_data) const
++{
++    panic("CAN'T OPERATE WITHOUT ACCESS PACKET INFORMATION");
++}
++
++void MJRP::reset(const std::shared_ptr<ReplacementData>& replacement_data,
++                 const PacketPtr pkt)
++{
++    warn("ENTER RESET\n");
++    std::static_pointer_cast<MJReplData>(replacement_data)->lastTouchTick =
++        curTick();
++    std::static_pointer_cast<MJReplData>(replacement_data)
++        ->generatingPCSignature =
++        pkt->req->hasPC() ? get_pc_signature(pkt->req->getPC(), false) : 0;
++    std::static_pointer_cast<MJReplData>(replacement_data)->blkAddr =
++        pkt->getAddr();
++
++    auto castedData = std::static_pointer_cast<MJReplData>(replacement_data);
++    uint64_t ip = 0;
++    if (pkt->req->hasPC())
++        ip = pkt->req->getPC();
++    auto fullAddr = pkt->getAddr();
++    auto set = castedData->set;
++    auto way = castedData->way;
++    uint16_t pcSignature = get_pc_signature(ip, false);
++    castedData->generatingPCSignature = pcSignature;
++    if (sampled_cache.is_set_to_sample(set))
++    {
++        auto sampled_set = sampled_cache.get_set(fullAddr);
++        auto sampled_tag = sampled_cache.get_tag(fullAddr);
++        auto sampled_way = sampled_cache.is_present(sampled_tag, sampled_set);
++        if (sampled_way == -1)
++            goto out;
++
++        auto& entry = sampled_cache.at(sampled_set, sampled_way);
++        auto last_sig = entry.last_pc_signature;
++        auto last_access_timestamp = entry.last_access_timestamp;
++        int diff = abs(last_access_timestamp -
++                       etr_counters.get_set_timestamp(sampled_set));
++
++        if (diff <= 127)
++        {
++            int rdp_value = rdp.get_value_of(pcSignature);
++            int new_val = 0;
++
++            if (rdp_value == std::numeric_limits<uint8_t>::max())
++                new_val = diff;
++            else
++                new_val = rdp_value + (rdp_value > diff)
++                              ? std::min(1, diff / 16)
++                              : -std::min(1, diff / 16);
++
++            rdp.set_value_of(pcSignature, new_val);
++            sampled_cache.at(sampled_set, sampled_way).valid = false;
++        }
++
++        int lru_way = -1;
++        int lru_rd = -1;
++        for (int w = 0; w < SAMPLED_CACHE_WAYS; w++)
++        {
++            if (!sampled_cache.at(sampled_set, w).valid)
++            {
++                lru_way = w;
++                lru_rd = INF_RD + 1;
++                continue;
++            }
++
++            uint64_t last_timestamp =
++                sampled_cache.at(sampled_set, w).last_access_timestamp;
++            int set_timestamp = etr_counters.get_set_timestamp(sampled_set);
++            int diff = 0;
++            if (set_timestamp > last_timestamp)
++                diff = set_timestamp > last_timestamp;
++            else
++            {
++                diff = set_timestamp + (1 << TIMESTAMP_BITS);
++                diff -= last_timestamp;
++            }
++            if (diff > INF_RD)
++            {
++                lru_way = w;
++                lru_rd = INF_RD + 1;
++                penalize_block(sampled_set, w);
++            }
++            else if (diff > lru_rd)
++            {
++                lru_way = w;
++                lru_rd = diff;
++            }
++        }
++        penalize_block(sampled_set, lru_way);
++
++        for (int w = 0; w < SAMPLED_CACHE_WAYS; w++)
++        {
++            auto& tmpEntry = sampled_cache.at(sampled_set, w);
++            if (!tmpEntry.valid)
++            {
++                tmpEntry.valid = true;
++                tmpEntry.last_pc_signature = pcSignature;
++                tmpEntry.tag = sampled_tag;
++                tmpEntry.last_access_timestamp =
++                    etr_counters.get_set_timestamp(set);
++                break;
++            }
++        }
++        etr_counters.increment_timestamp(sampled_set);
++    }
++out:
++
++    if (etr_counters.get_current_set_clock(set) == GRANULARITY)
++    {
++        for (int w = 0; w < LLC_NUM_WAYS; w++)
++        {
++            if ((uint32_t)w != way &&
++                abs(etr_counters.get_estimated_time_remaining(set, w)) <
++                    INF_ETR)
++                etr_counters.downgrade(set, w);
++        }
++        etr_counters.reset_set_clock(set);
++    }
++    etr_counters.set_current_set_clock(
++        set, etr_counters.get_current_set_clock(set) + 1);
++
++    if (way < LLC_NUM_WAYS)
++    {
++        if (rdp.get_value_of(pcSignature) ==
++            std::numeric_limits<uint8_t>::max())
++        {
++            etr_counters.set_estimated_time_remaining(set, way, 0);
++        }
++        else
++        {
++            if (rdp.get_value_of(pcSignature) > MAX_RD)
++                etr_counters.set_estimated_time_remaining(set, way, INF_ETR);
++            else
++                etr_counters.set_estimated_time_remaining(
++                    set, way, rdp.get_value_of(pcSignature) / GRANULARITY);
++        }
++    }
++
++    warn("EXIT RESET\n");
++}
++
++ReplaceableEntry*
++MJRP::getVictim(const ReplacementCandidates& candidates) const
++{
++    warn("ENTER VICTIM\n");
++    // There must be at least one replacement candidate
++    assert(candidates.size() > 0);
++
++    uint32_t way_to_evict = etr_counters.way_to_evict(candidates[0]->getSet());
++    ReplaceableEntry* victim = candidates[0];
++    ReplaceableEntry* lruCandidate = candidates[0];
++    for (const auto& candidate : candidates)
++    {
++        // Update victim entry if necessary
++        if (candidate->getWay() == way_to_evict)
++        {
++            victim = candidate;
++        }
++
++        if (std::static_pointer_cast<MJReplData>(candidate->replacementData)
++                ->lastTouchTick <
++            std::static_pointer_cast<MJReplData>(victim->replacementData)
++                ->lastTouchTick)
++        {
++            lruCandidate = candidate;
++        }
++
++        std::static_pointer_cast<MJReplData>(candidate->replacementData)->way =
++            candidate->getWay();
++        std::static_pointer_cast<MJReplData>(candidate->replacementData)->set =
++            candidate->getSet();
++    }
++
++    if (victim->getWay() != way_to_evict)
++    {
++        victim = lruCandidate;
++        warn("PICKING LRU\n");
++    }
++
++    warn("EXIT VICTIM\n");
++    return victim;
++}
++
++std::shared_ptr<ReplacementData> MJRP::instantiateEntry()
++{
++    return std::shared_ptr<ReplacementData>(new MJReplData());
++}
++
++} // namespace replacement_policy
++} // namespace gem5
+diff --git a/src/mem/cache/replacement_policies/mj_rp.hh b/src/mem/cache/replacement_policies/mj_rp.hh
+new file mode 100644
+index 0000000000..6ad19bbb6f
+--- /dev/null
++++ b/src/mem/cache/replacement_policies/mj_rp.hh
+@@ -0,0 +1,394 @@
++/**
++ * Copyright (c) 2018 Inria
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met: redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer;
++ * redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution;
++ * neither the name of the copyright holders nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * @file
++ * Declaration of a Least Recently Used replacement policy.
++ * The victim is chosen using the last touch timestamp.
++ */
++
++#ifndef __MEM_CACHE_REPLACEMENT_POLICIES_MJ_RP_HH__
++#define __MEM_CACHE_REPLACEMENT_POLICIES_MJ_RP_HH__
++
++#include "mem/cache/replacement_policies/base.hh"
++
++// #include "mem/packet.hh"
++
++#include <algorithm>
++#include <cassert>
++#include <cmath>
++#include <deque>
++#include <iterator>
++#include <unordered_map>
++
++#define LOG2_BLOCK_SIZE 6
++#define LLC_NUM_SETS ((1024 * 1024) / (16 * 64))
++#define LLC_NUM_WAYS 16
++
++#define LLC_BLOCK_SIZE 64
++#define LLC_BLOCK_SIZE_LOG_2 6
++
++#define PC_SIG_MASK 0x3ff
++
++constexpr int HISTORY = 8;
++constexpr int GRANULARITY = 8;
++
++constexpr int INF_RD = LLC_NUM_WAYS * HISTORY - 1;
++constexpr int INF_ETR = (LLC_NUM_WAYS * HISTORY / GRANULARITY) - 1;
++constexpr int MAX_RD = INF_RD - 22;
++
++constexpr int LOG2_LLC_SET = log2(LLC_NUM_SETS);
++constexpr int LOG2_LLC_SIZE =
++    LOG2_LLC_SET + log2(LLC_NUM_WAYS) + LOG2_BLOCK_SIZE;
++constexpr int LOG2_SAMPLED_SETS = LOG2_LLC_SIZE - 16;
++
++constexpr int SAMPLED_CACHE_WAYS = 5;
++constexpr int LOG2_SAMPLED_CACHE_SETS = 4;
++constexpr int SAMPLED_CACHE_TAG_BITS = 31 - LOG2_LLC_SIZE;
++constexpr int PC_SIGNATURE_BITS = LOG2_LLC_SIZE - 10;
++constexpr int TIMESTAMP_BITS = 8;
++
++namespace gem5
++{
++
++struct MJRPParams;
++
++GEM5_DEPRECATED_NAMESPACE(ReplacementPolicy, replacement_policy);
++namespace replacement_policy
++{
++
++class Counters
++{
++  public:
++    void init(uint32_t sets, uint32_t ways)
++    {
++        etr_entries =
++            std::vector<std::vector<int>>(sets, std::vector<int>(ways));
++    }
++
++    uint32_t way_to_evict(uint32_t set) const
++    {
++        assert(set < LLC_NUM_SETS);
++        int highest_absolute_value = abs(etr_entries[set][0]);
++        uint32_t idx = 0;
++        bool is_negative = etr_entries[set][0] < 0;
++
++        for (uint32_t i = 1; i < LLC_NUM_WAYS; i++)
++        {
++            int curr_abs_value = abs(of(set, i));
++            bool is_curr_neg = of(set, i) < 0;
++            if (curr_abs_value > highest_absolute_value ||
++                (curr_abs_value == highest_absolute_value && is_curr_neg &&
++                 !is_negative))
++            {
++                highest_absolute_value = curr_abs_value;
++                idx = i;
++                is_negative = is_curr_neg;
++            }
++        }
++
++        return idx;
++    }
++
++    int get_set_timestamp(uint32_t set)
++    {
++        // assert(set < set_timestamp.size());
++        return set_timestamp[set];
++    }
++
++    void increment_timestamp(uint32_t set)
++    {
++        set_timestamp[set] += 1;
++        set_timestamp[set] %= (1 << TIMESTAMP_BITS);
++    }
++
++    int get_estimated_time_remaining(uint32_t set, uint32_t way) const
++    {
++        return of(set, way);
++    }
++
++    void set_estimated_time_remaining(uint32_t set, uint32_t way, int etr)
++    {
++        assert(set < LLC_NUM_SETS && way < LLC_NUM_WAYS);
++        etr_entries[set][way] = etr;
++    }
++
++    void downgrade(uint32_t set, uint32_t way)
++    {
++        assert(set < LLC_NUM_SETS && way < LLC_NUM_WAYS);
++        etr_entries[set][way] -= 1;
++    }
++
++    int get_current_set_clock(uint32_t set)
++    {
++        // assert(set < set_timestamp.size());
++        return set_current_clock[set];
++    }
++
++    void set_current_set_clock(uint32_t set, int clk)
++    {
++        // assert(set < set_timestamp.size());
++        set_current_clock[set] = clk;
++    }
++
++    void reset_set_clock(uint32_t set)
++    {
++        assert(set < LLC_NUM_SETS);
++        set_current_clock[set] = 0;
++    }
++
++  private:
++    int of(uint32_t set, uint32_t way) const
++    {
++        assert(set < LLC_NUM_SETS && way < LLC_NUM_WAYS);
++        return etr_entries[set][way];
++    }
++
++  private:
++    std::vector<std::vector<int>> etr_entries;
++    std::unordered_map<uint32_t, int> set_timestamp;
++    std::unordered_map<uint32_t, int> set_current_clock;
++};
++
++class ReuseDistancePredictor
++{
++  public:
++    uint8_t get_value_of(uint16_t sig)
++    {
++        if (entries.find(sig) != std::end(entries))
++            return entries[sig];
++        else
++            return std::numeric_limits<uint8_t>::max();
++    }
++
++    void set_value_of(uint16_t sig, uint8_t diff) { entries[sig] = diff; }
++
++  private:
++    std::unordered_map<uint16_t, uint8_t> entries;
++};
++
++struct SampledCacheEntry
++{
++    bool valid;
++
++    // FIXME: Assuming a larger timestamp so we don't have to check overflow.
++    // The paper demonstrates the usage of 1 byte
++    int last_access_timestamp;
++    uint64_t last_pc_signature;
++    uint64_t tag;
++};
++
++class SampledCache
++{
++  public:
++    bool is_set_to_sample(uint32_t set)
++    {
++        int mask_length = LOG2_LLC_SET - LOG2_SAMPLED_SETS;
++        int mask = (1 << mask_length) - 1;
++        return (set & mask) == ((set >> (LOG2_LLC_SET - mask_length)) & mask);
++    }
++
++    void init()
++    {
++        warn("ENTER Sampled Cache INIT\n");
++        sampled_sets = 0;
++        sampled_ways = 5;
++        for (uint32_t i = 0; i < LLC_NUM_SETS; i++)
++        {
++            if (is_set_to_sample(i))
++            {
++                // entries[i] = std::vector<SampledCacheEntry>(n_ways());
++                int modifier = 1 << LOG2_LLC_SET;
++                int limit = 1 << LOG2_SAMPLED_CACHE_SETS;
++                for (int j = 0; j < limit; j++)
++                {
++                    entries[i + modifier * j] =
++                        std::vector<SampledCacheEntry>(n_ways());
++                    sampled_sets++;
++                }
++            }
++        }
++        warn("EXIT Sampled Cache INIT\n");
++    }
++
++    /*
++    Sampled Cache is indexed using a concatenation of the 5 set id bits that
++    identify the 32 sampled sets and the bits [3:0] of the block address tag
++    TODO: only sample 32 sets.
++    */
++    uint64_t get_set(uint64_t pc) const
++    {
++        // uint64_t sampled_set_bits = log2(n_sampled_sets());
++        uint64_t sampled_set_mask = (n_sampled_sets() - 1) << LOG2_BLOCK_SIZE;
++        return (pc & sampled_set_mask) >> LOG2_BLOCK_SIZE;
++    }
++
++    uint64_t get_tag(uint64_t pc) const
++    {
++        uint64_t tag_bits = 64 - LOG2_BLOCK_SIZE - log2(n_sampled_sets());
++        return (pc & ((1 << tag_bits) - 1)) >> tag_bits;
++    }
++
++    int is_present(uint64_t tag, uint64_t set)
++    {
++        warn("ENTER is_present\n");
++        warn("set: %d\n", set);
++        if (entries.find(set) == std::end(entries))
++            return -1;
++        for (int i = 0; i < n_ways(); i++)
++        {
++            if (entries[set][i].valid && tag == entries[set][i].tag)
++            {
++                warn("EXIT is_present\n");
++                return i;
++            }
++        }
++        warn("EXIT is_present\n");
++        return -1;
++    }
++
++    uint32_t n_ways() const { return sampled_ways; }
++    uint32_t n_sampled_sets() const { return sampled_sets; }
++
++    SampledCacheEntry& at(uint32_t set, uint32_t way)
++    {
++        // assert(way < n_ways());
++        warn("ENTER SAMPLED_CACHE_AT\n");
++        assert(is_set_to_sample(set));
++        auto& ret = entries[set][way];
++        warn("ENTER SAMPLED_CACHE_AT\n");
++        return ret;
++    }
++
++  private:
++    std::unordered_map<uint32_t, std::vector<SampledCacheEntry>> entries;
++    uint32_t sampled_ways;
++    uint32_t sampled_sets;
++};
++
++class MJRP : public Base
++{
++  protected:
++    /** LRU-specific implementation of replacement data. */
++    struct MJReplData : public ReplacementData
++    {
++        /** Tick on which the entry was last touched. */
++        Tick lastTouchTick;
++        bool valid;
++        uint64_t generatingPCSignature;
++        uint64_t blkAddr;
++        uint64_t way;
++        uint64_t set;
++        /**
++         * Default constructor. Invalidate data.
++         */
++        MJReplData() : lastTouchTick(0), valid(false) {}
++    };
++
++  public:
++    typedef MJRPParams Params;
++    MJRP(const Params& p);
++    ~MJRP() = default;
++
++    /**
++     * Invalidate replacement data to set it as the next probable victim.
++     * Sets its last touch tick as the starting tick.
++     *
++     * @param replacement_data Replacement data to be invalidated.
++     */
++    void invalidate(
++        const std::shared_ptr<ReplacementData>& replacement_data) override;
++
++    /**
++     * Touch an entry to update its replacement data.
++     * Sets its last touch tick as the current tick.
++     *
++     * @param replacement_data Replacement data to be touched.
++     */
++    void touch(const std::shared_ptr<ReplacementData>& replacement_data)
++        const override;
++    void touch(const std::shared_ptr<ReplacementData>& replacement_data,
++               const PacketPtr pkt) override;
++
++    /**
++     * Reset replacement data. Used when an entry is inserted.
++     * Sets its last touch tick as the current tick.
++     *
++     * @param replacement_data Replacement data to be reset.
++     */
++    void reset(const std::shared_ptr<ReplacementData>& replacement_data)
++        const override;
++    void reset(const std::shared_ptr<ReplacementData>& replacement_data,
++               const PacketPtr pkt) override;
++
++    /**
++     * Find replacement victim using MJRP timestamps.
++     *
++     * @param candidates Replacement candidates, selected by indexing policy.
++     * @return Replacement entry to be replaced.
++     */
++    ReplaceableEntry*
++    getVictim(const ReplacementCandidates& candidates) const override;
++
++    /**
++     * Instantiate a replacement data entry.
++     *
++     * @return A shared pointer to the new replacement data.
++     */
++    std::shared_ptr<ReplacementData> instantiateEntry() override;
++
++    void penalize_block(uint64_t set, uint64_t way)
++    {
++        if (!sampled_cache.at(set, way).valid)
++            return;
++        if (rdp.get_value_of(sampled_cache.at(set, way).last_pc_signature) !=
++            std::numeric_limits<uint8_t>::max())
++        {
++            rdp.set_value_of(
++                sampled_cache.at(set, way).last_pc_signature,
++                rdp.get_value_of(
++                    sampled_cache.at(set, way).last_pc_signature) +
++                    1);
++            if (rdp.get_value_of(
++                    sampled_cache.at(set, way).last_pc_signature) > INF_RD)
++                rdp.set_value_of(sampled_cache.at(set, way).last_pc_signature,
++                                 INF_RD);
++        }
++        sampled_cache.at(set, way).valid = false;
++    }
++
++  private:
++    SampledCache sampled_cache;
++    ReuseDistancePredictor rdp;
++    Counters etr_counters;
++};
++
++} // namespace replacement_policy
++} // namespace gem5
++
++#endif // __MEM_CACHE_REPLACEMENT_POLICIES_MJRP_RP_HH__
+diff --git a/src/python/gem5/components/cachehierarchies/classic/caches/l2cache.py b/src/python/gem5/components/cachehierarchies/classic/caches/l2cache.py
+index 43c18718de..3428597553 100644
+--- a/src/python/gem5/components/cachehierarchies/classic/caches/l2cache.py
++++ b/src/python/gem5/components/cachehierarchies/classic/caches/l2cache.py
+@@ -27,6 +27,7 @@
+ from .....utils.override import *
+ 
+ from m5.objects import Cache, BasePrefetcher, StridePrefetcher
++from m5.objects.ReplacementPolicies import *
+ 
+ from typing import Type
+ 
+@@ -58,3 +59,5 @@ class L2Cache(Cache):
+         self.tgts_per_mshr = tgts_per_mshr
+         self.writeback_clean = writeback_clean
+         self.prefetcher = PrefetcherCls()
++        #self.replacement_policy = MJRP()
++        self.replacement_policy = LRURP()
+-- 
+2.25.1
+
