@@ -5,10 +5,13 @@ from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.resources.resource import Resource, CustomResource
 from gem5.simulate.simulator import Simulator
+from m5.objects import *
 
 from m5.SimObject import *
 from m5.params import *
 from m5.objects.ReplacementPolicies import *
+
+import os
 
 class CacheHier(PrivateL1PrivateL2CacheHierarchy):
     def __init__(self, l1d_size="1kB", l1i_size="1kB", l2_size="64kB"):
@@ -30,8 +33,18 @@ board = SimpleBoard(
 # Set the workload.
 # binary = Resource("x86-hello64-static")
 # binary = CustomResource("bench.X86")
-binary = CustomResource("bench.X86")
+binary = CustomResource("/data/benchmarks/spec2017/benchspec/CPU/500.perlbench_r/exe/perlbench_r_base.mytest-m64", )
+p = Process(pid=10130)
+p.executable="/data/benchmarks/spec2017/benchspec/CPU/500.perlbench_r/exe/perlbench_r_base.mytest-m64"
+opt = "/data/benchmarks/spec2017/benchspec/CPU/500.perlbench_r/data/test/input/makerand.pl"
+p.cwd = os.getcwd()
+p.gid = os.getgid()
+p.cmd = ["/data/benchmarks/spec2017/benchspec/CPU/500.perlbench_r/exe/perlbench_r_base.mytest-m64", 
+         "/data/benchmarks/spec2017/benchspec/CPU/500.perlbench_r/data/test/input/makerand.pl"]
+
+# binary = CustomResource("a.sh")
 board.set_se_binary_workload(binary)
+board.processor.workload = p
 
 # Setup the Simulator and run the simulation.
 simulator = Simulator(board=board)
