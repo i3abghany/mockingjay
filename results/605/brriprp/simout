@@ -1,0 +1,23 @@
+gem5 Simulator System.  https://www.gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 version 22.0.0.2
+gem5 compiled Dec 12 2022 08:04:45
+gem5 started Dec 12 2022 08:05:07
+gem5 executing on cs-arch-srv01, pid 742216
+command line: /localhome/mam47/750/mockingjay/gem5/build/X86/gem5.fast -r -e --outdir=brriprp /localhome/mam47/750/mockingjay/gem5/configs/example/se.py --cmd=../../build/build_base_mytest-m64.0000/mcf_s --options=inp.in -F 100000000 -I 100000000 --cpu-type=O3CPU --caches --l2cache --l2_size 1MB --l1d_size=32kB --l1i_size=32kB --l2_assoc=16 --l2_repl=BRRIPRP
+
+info: Standard input is not a terminal, disabling listeners.
+Global frequency set at 1000000000000 ticks per second
+Switch at instruction count:100000000
+
+MCF SPEC CPU version 1.11
+Copyright (c) 1998-2000 Zuse Institut Berlin (ZIB)
+Copyright (c) 2000-2002 Andreas Loebel & ZIB
+Copyright (c) 2003-2005 Andreas Loebel
+Copyright (c) 2006-2010 Dres. Loebel, Borndoerfer & Weider GbR (LBW)
+
+Switched CPUS @ tick 113353338000
+switching cpus
+**** REAL SIMULATION ****
+Exiting @ tick 144439807000 because a thread reached the max instruction count

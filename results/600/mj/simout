@@ -1,0 +1,17 @@
+gem5 Simulator System.  https://www.gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 version 22.0.0.2
+gem5 compiled Dec 12 2022 12:32:56
+gem5 started Dec 12 2022 13:08:30
+gem5 executing on cs-arch-srv01, pid 926832
+command line: /localhome/mam47/750/mockingjay/gem5/build/X86/gem5.fast -r -e --outdir=mj /localhome/mam47/750/mockingjay/gem5/configs/example/se.py --cmd=../../build/build_base_mytest-m64.0000/perlbench_s '--options=splitmail.pl 6400 12 26 16 100' -F 100000000 -I 100000000 --cpu-type=O3CPU --caches --l2cache --l2_size 1MB --l1d_size=32kB --l1i_size=32kB --l2_assoc=16 --l2_repl=MJRP
+
+info: Standard input is not a terminal, disabling listeners.
+Global frequency set at 1000000000000 ticks per second
+Switch at instruction count:100000000
+Switched CPUS @ tick 111513320000
+switching cpus
+**** REAL SIMULATION ****
+Exiting @ tick 131700942500 because exiting with last active thread context
+Simulated exit code not 0! Exit code is 255

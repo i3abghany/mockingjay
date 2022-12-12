@@ -1,0 +1,16 @@
+gem5 Simulator System.  https://www.gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 version 22.0.0.2
+gem5 compiled Dec 11 2022 18:53:36
+gem5 started Dec 12 2022 07:21:06
+gem5 executing on cs-arch-srv01, pid 714376
+command line: /localhome/mam47/750/mockingjay/gem5/build/X86/gem5.opt -r -e --outdir=shipmem /localhome/mam47/750/mockingjay/gem5/configs/example/se.py --cmd=../../build/build_base_mytest-m64.0000/sgcc '--options=gcc-pp.c -O5 -finline-limit=1000 -fselective-scheduling -fselective-scheduling2 -o gcc-pp.opts-O5_-finline-limit_1000_-fselective-scheduling_-fselective-scheduling2.' -F 100000000 -I 100000000 --caches --l2cache --l2_size 1MB --l1d_size=32kB --cpu-type=O3CPU --l1i_size=32kB --l2_assoc=16 --l2_repl=SHiPMemRP
+
+info: Standard input is not a terminal, disabling listeners.
+Global frequency set at 1000000000000 ticks per second
+Switch at instruction count:100000000
+Switched CPUS @ tick 115465480500
+switching cpus
+**** REAL SIMULATION ****
+Exiting @ tick 193931791000 because a thread reached the max instruction count
