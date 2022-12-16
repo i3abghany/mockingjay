@@ -45,3 +45,8 @@ After building gem5, a sample script to run simulation using Mockingjay in L2 wo
 ```console
 gem5/build/X86/gem5.fast -r -e --outdir=mj_output  ~/750/mockingjay/gem5/configs/example/se.py --cmd="path/to/example/x86/binary" -F 100000000 --warmup-insts=100000000 -I 100000000 --cpu-type="O3CPU" --caches --l2cache --l2_size "1MB" --l1d_size="32kB" --l1i_size="32kB" --l2_assoc=16 --l2_repl="MJRP"
 ```
+We used three SPECCPU2017 benchmarks. 
+
+* 600.perlbench_s
+* 602.gcc_s
+* 605.mcf_s
